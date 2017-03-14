@@ -51,6 +51,7 @@
 #include <avahi-core/core.h>
 #include <avahi-core/lookup.h>
 #include <avahi-core/publish.h>
+#include <avahi-core/reconfirm.h>
 
 #include "dbus-protocol.h"
 #include "dbus-util.h"
@@ -997,6 +998,51 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
         i->path = avahi_strdup_printf("/Client%u/RecordBrowser%u", client->id, i->id);
         dbus_connection_register_object_path(c, i->path, &vtable, i);
         return avahi_dbus_respond_path(c, m, i->path);
+    } else if (dbus_message_is_method_call(m, AVAHI_DBUS_INTERFACE_SERVER, "ReconfirmRecord")) {
+        int32_t interface, protocol;
+        uint32_t flags, size;
+        char *fullname;
+        uint16_t type, clazz;
+        void *rdata;
+        AvahiRecord *r;
+        int result;
+
+        if (!dbus_message_get_args(
+                m, &error,
+                DBUS_TYPE_INT32, &interface,
+                DBUS_TYPE_INT32, &protocol,
+                DBUS_TYPE_STRING, &fullname,
+                DBUS_TYPE_UINT16, &type,
+                DBUS_TYPE_UINT16, &clazz,
+                DBUS_TYPE_UINT32, &flags,
+                DBUS_TYPE_INVALID) || !fullname ||
+            avahi_dbus_read_rdata (m, 6, &rdata, &size)) {
+            avahi_log_warn("Error parsing Server::ReconfirmRecord message");
+            goto fail;
+        }
+
+        if (!AVAHI_IF_VALID(interface) || (interface == AVAHI_IF_UNSPEC))
+            return avahi_dbus_respond_error(c, m, AVAHI_ERR_INVALID_INTERFACE, NULL);
+
+        if (!avahi_is_valid_domain_name(fullname))
+            return avahi_dbus_respond_error(c, m, AVAHI_ERR_INVALID_DOMAIN_NAME, NULL);
+
+        if (!(r = avahi_record_new_full(fullname, clazz, type, 0)))
+            return avahi_dbus_respond_error(c, m, AVAHI_ERR_NO_MEMORY, NULL);
+
+        if (avahi_rdata_parse(r, rdata, size) < 0) {
+            avahi_record_unref(r);
+            return avahi_dbus_respond_error(c, m, AVAHI_ERR_INVALID_RDATA, NULL);
+        }
+
+        result = avahi_record_reconfirm(avahi_server, (AvahiIfIndex) interface, (AvahiProtocol) protocol, r);
+
+        avahi_record_unref(r);
+
+        if (!result)
+            return avahi_dbus_respond_error(c, m, AVAHI_ERR_INVALID_RECORD, NULL);
+
+        return avahi_dbus_respond_int32(c, m, AVAHI_OK);
     }
 
     avahi_log_warn("Missed message %s::%s()", dbus_message_get_interface(m), dbus_message_get_member(m));
